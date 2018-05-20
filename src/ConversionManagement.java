@@ -58,42 +58,42 @@ class ResultDataPortion extends DataPortion {
 }
 
 class Converter extends Thread {
-    public Converter(ConverterInterface converter,
-                     PriorityBlockingQueue<ConverterInterface.DataPortionInterface> dataQueue,
+    public Converter(ConversionManagement cm,
+                     PriorityBlockingQueue<DataPortion> dataQueue,
                      Semaphore killCores,
                      PriorityBlockingQueue<ResultDataPortion> resultLeftChannelQueue,
                      PriorityBlockingQueue<ResultDataPortion> resultRightChannelQueue) {
-        this.converter = converter;
+        this.cm = cm;
         this.dataQueue = dataQueue;
         this.killCores = killCores;
         this.resultLeftChannelQueue = resultLeftChannelQueue;
         this.resultRightChannelQueue = resultRightChannelQueue;
 
-        System.out.println("Converter::Converter() " + getName() + " created");
+//        System.out.println("Converter::Converter() " + getName() + " created");
     }
 
     public void run() {
         while (true) {
             try {
                 if (killCores.tryAcquire()) {
-                    System.out.println("C::run() Thread " + getName() + " is exiting...");
+//                    System.out.println("C::run() Thread " + getName() + " is exiting...");
                     return;
                 }
 
                 // convert data
-                ConverterInterface.DataPortionInterface data = dataQueue.poll(10, TimeUnit.MILLISECONDS);
+                DataPortion data = dataQueue.poll(10, TimeUnit.MILLISECONDS);
                 if (data == null)
                     continue;
 
-                System.out.println("C::run() Thread " + getName() + " processing " + data.id() + "." + data.channel() + " ...");
-                long result = converter.convert(data);
+//                System.out.println("C::run() Thread " + getName() + " processing " + data.data.id() + "." + data.data.channel() + " ...");
+                long result = cm.converter.convert(data.data);
 
-                ResultDataPortion rdp = new ResultDataPortion(data, result);
-                if (data.channel() == ConverterInterface.Channel.LEFT_CHANNEL)
+                ResultDataPortion rdp = new ResultDataPortion(data.data, result);
+                if (data.data.channel() == ConverterInterface.Channel.LEFT_CHANNEL)
                     resultLeftChannelQueue.add(rdp);
                 else
                     resultRightChannelQueue.add(rdp);
-                System.out.println("C::run() Thread " + getName() + " processing " + data.id() + "." + data.channel() + " DONE");
+//                System.out.println("C::run() Thread " + getName() + " processing " + data.data.id() + "." + data.data.channel() + " DONE");
 
             } catch (InterruptedException e) {
                 e.printStackTrace();
@@ -101,11 +101,57 @@ class Converter extends Thread {
         }
     }
 
-    ConverterInterface converter;
-    PriorityBlockingQueue<ConverterInterface.DataPortionInterface> dataQueue;
+    ConversionManagement cm;
+    PriorityBlockingQueue<DataPortion> dataQueue;
     Semaphore killCores;
     PriorityBlockingQueue<ResultDataPortion> resultLeftChannelQueue;
     PriorityBlockingQueue<ResultDataPortion> resultRightChannelQueue;
+}
+
+class ResultReceiver extends Thread {
+    public ResultReceiver(
+            PriorityBlockingQueue<ResultDataPortion> resultLeftChannelQueue,
+            PriorityBlockingQueue<ResultDataPortion> resultRightChannelQueue,
+            ConversionManagement cm
+    ) {
+        this.resultLeftChannelQueue = resultLeftChannelQueue;
+        this.resultRightChannelQueue = resultRightChannelQueue;
+        this.cm = cm;
+    }
+
+    public void run() {
+        while (true) {
+            if (resultLeftChannelQueue.size() > 0 && resultRightChannelQueue.size() > 0) {
+                ResultDataPortion l = resultLeftChannelQueue.peek();
+                if (l.data.id() == idTodo) {
+                    ResultDataPortion r = resultRightChannelQueue.peek();
+                    if (r.data.id() == idTodo) {
+                        resultLeftChannelQueue.remove();
+                        resultRightChannelQueue.remove();
+
+                        ConversionManagementInterface.ConversionResult cr = new ConversionManagementInterface.ConversionResult(
+                                l.data, r.data, l.result, r.result
+                        );
+                        cm.receiver.result(cr);
+                        ++idTodo;
+                    }
+                }
+            }
+
+            try {
+                synchronized (this) {
+                    wait(10);
+                }
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    PriorityBlockingQueue<ResultDataPortion> resultLeftChannelQueue;
+    PriorityBlockingQueue<ResultDataPortion> resultRightChannelQueue;
+    ConversionManagement cm;
+    int idTodo = 1;
 }
 
 
@@ -117,161 +163,68 @@ public class ConversionManagement implements ConversionManagementInterface {
 
 
     ConversionManagement() {
-        System.out.println("CM::ConversionManagement()");
+//        System.out.println("CM::ConversionManagement()");
         try {
             killCores.acquire(ConversionManagement.SEM_KILL_CORE);
-            killCores.acquire(ConversionManagement.SEM_RES_MAX_AVAILABLE);
+//            killCores.acquire(ConversionManagement.SEM_RES_MAX_AVAILABLE);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
+
+        resultReceiver = new ResultReceiver(resultLeftChannelQueue, resultRightChannelQueue, this);
+        resultReceiver.start();
     }
 
     @Override
     public void setCores(int cores) {
-        System.out.println("CM::setCores(" + cores + ")");
+//        System.out.println("CM::setCores(" + cores + ")");
 
         int newCores = cores - maxCores;
         this.maxCores = cores;
 
         if (newCores < 0) {
-            killCores.release(newCores);
+            killCores.release(Math.abs(newCores));
         } else {
-            Thread th = new Converter(
-                    converter,
-                    dataQueue,
-                    killCores,
-                    resultLeftChannelQueue,
-                    resultRightChannelQueue);
-            th.start();
+            for (int i = 0; i < newCores; ++i) {
+                Thread th = new Converter(
+                        this,
+                        dataQueue,
+                        killCores,
+                        resultLeftChannelQueue,
+                        resultRightChannelQueue);
+                th.start();
+            }
         }
     }
 
     @Override
     public void setConverter(ConverterInterface converter) {
-        System.out.println("CM::setConverter()");
+//        System.out.println("CM::setConverter()");
         this.converter = converter;
     }
 
     @Override
     public void setConversionReceiver(ConversionReceiverInterface receiver) {
-        System.out.println("CM::setConversionReceiver()");
+//        System.out.println("CM::setConversionReceiver()");
         this.receiver = receiver;
     }
 
     @Override
     public void addDataPortion(ConverterInterface.DataPortionInterface data) {
-        System.out.println("CM::addDataPortion(" + data.id() + "(" + data.channel() + ")" + ")");
+//        System.out.println("CM::addDataPortion(" + data.id() + "(" + data.channel() + ")" + ")");
 
-        dataQueue.add(data);
+        dataQueue.add(new DataPortion(data));
     }
 
     ConverterInterface converter;
     ConversionReceiverInterface receiver;
 
+    ResultReceiver resultReceiver;
+
     int maxCores = 0;
     Semaphore killCores = new Semaphore(ConversionManagement.SEM_KILL_CORE);
-//    Semaphore resourceAvailable = new Semaphore(ConversionManagement.SEM_RES_MAX_AVAILABLE);
-    PriorityBlockingQueue<ConverterInterface.DataPortionInterface> dataQueue;
-    PriorityBlockingQueue<ResultDataPortion> resultLeftChannelQueue;
-    PriorityBlockingQueue<ResultDataPortion> resultRightChannelQueue;
+    PriorityBlockingQueue<DataPortion> dataQueue = new PriorityBlockingQueue<>();
+    PriorityBlockingQueue<ResultDataPortion> resultLeftChannelQueue = new PriorityBlockingQueue<>();
+    PriorityBlockingQueue<ResultDataPortion> resultRightChannelQueue = new PriorityBlockingQueue<>();
 
-    public static void main(String[] argv) throws InterruptedException {
-        System.out.println("Start");
-
-        PriorityBlockingQueue<Integer> q = new PriorityBlockingQueue<>(50);
-
-        q.add(10);
-        q.add(4);
-        System.out.println(q);
-
-        Semaphore s = new Semaphore(2);
-        System.out.println("" + s);
-        s.acquire();
-        s.tryAcquire();
-        System.out.println("" + s);
-        s.release(2);
-        System.out.println("" + s);
-
-        s.drainPermits();
-        System.out.println("" + s);
-
-        DataPortion d1l = new DataPortion(new DataPortionInterfaceImpl(1, ConverterInterface.Channel.LEFT_CHANNEL));
-        DataPortion d2l = new DataPortion(new DataPortionInterfaceImpl(2, ConverterInterface.Channel.LEFT_CHANNEL));
-        DataPortion d3l = new DataPortion(new DataPortionInterfaceImpl(3, ConverterInterface.Channel.LEFT_CHANNEL));
-        DataPortion d4l = new DataPortion(new DataPortionInterfaceImpl(4, ConverterInterface.Channel.LEFT_CHANNEL));
-        DataPortion d5l = new DataPortion(new DataPortionInterfaceImpl(5, ConverterInterface.Channel.LEFT_CHANNEL));
-        DataPortion d6l = new DataPortion(new DataPortionInterfaceImpl(6, ConverterInterface.Channel.LEFT_CHANNEL));
-        DataPortion d1r = new DataPortion(new DataPortionInterfaceImpl(1, ConverterInterface.Channel.RIGHT_CHANNEL));
-        DataPortion d2r = new DataPortion(new DataPortionInterfaceImpl(2, ConverterInterface.Channel.RIGHT_CHANNEL));
-        DataPortion d3r = new DataPortion(new DataPortionInterfaceImpl(3, ConverterInterface.Channel.RIGHT_CHANNEL));
-        DataPortion d4r = new DataPortion(new DataPortionInterfaceImpl(4, ConverterInterface.Channel.RIGHT_CHANNEL));
-        DataPortion d5r = new DataPortion(new DataPortionInterfaceImpl(5, ConverterInterface.Channel.RIGHT_CHANNEL));
-        DataPortion d6r = new DataPortion(new DataPortionInterfaceImpl(6, ConverterInterface.Channel.RIGHT_CHANNEL));
-
-        Comparator<DataPortion> ageComparator = new Comparator<DataPortion>() {
-            public int compare(DataPortion person1, DataPortion person2) {
-                int r = 2 * (person1.data.id() - person2.data.id()) ;
-                if (person1.data.channel() == ConverterInterface.Channel.RIGHT_CHANNEL)
-                    r += 1;
-
-                return r;
-            }
-        };
-        PriorityBlockingQueue<DataPortion> qq = new PriorityBlockingQueue<DataPortion>(50, ageComparator);
-        System.out.println(qq);
-        System.out.println("Adding d1L"); qq.add(d2l); System.out.println(qq);
-        System.out.println("Adding d1L"); qq.add(d1l); System.out.println(qq);
-        System.out.println("Adding d3L"); qq.add(d3l); System.out.println(qq);
-        System.out.println("Adding d4L"); qq.add(d4l); System.out.println(qq);
-        System.out.println("Adding d2R"); qq.add(d2r); System.out.println(qq);
-        System.out.println("Adding d5L"); qq.add(d5l); System.out.println(qq);
-        System.out.println("Adding d1R"); qq.add(d1r); System.out.println(qq);
-        System.out.println("Adding dr$"); qq.add(d4r); System.out.println(qq);
-
-        while (qq.size() != 0)
-            System.out.println(qq.remove());
-
-//        Integer i1l = new Integer(1);
-//        Integer i2l = new Integer(2);
-//        Integer i3l = new Integer(3);
-//        Integer i4l = new Integer(4);
-//        Integer i5l = new Integer(5);
-//        Integer i6l = new Integer(6);
-//        Integer i1r = new Integer(1);
-//        Integer i2r = new Integer(2);
-//        Integer i3r = new Integer(3);
-//        Integer i4r = new Integer(4);
-//        Integer i5r = new Integer(5);
-//        Integer i6r = new Integer(6);
-
-
-//        PriorityBlockingQueue<Integer> qqi = new PriorityBlockingQueue<>();
-//        System.out.println(qq);
-//        qqi.add(i2l); System.out.println(qqi);
-//        qqi.add(i1l); System.out.println(qqi);
-//        qqi.add(i3l); System.out.println(qqi);
-//        qqi.add(i4l); System.out.println(qqi);
-//        qqi.add(i2r); System.out.println(qqi);
-//        qqi.add(i5l); System.out.println(qqi);
-//        qqi.add(i1r); System.out.println(qqi);
-//        qqi.add(i4r); System.out.println(qqi);
-
-//        PriorityBlockingQueue<MyClass> queue = new PriorityBlockingQueue<MyClass>();
-////        queue.add(new MyClass(2, "L"));
-////        queue.add(new MyClass(1, "L"));
-////        queue.add(new MyClass(3, "L"));
-////        queue.add(new MyClass(4, "L"));
-////        queue.add(new MyClass(2, "R"));
-////        queue.add(new MyClass(5, "L"));
-////        queue.add(new MyClass(1, "R"));
-////        queue.add(new MyClass(4, "R"));
-//        queue.add(new MyClass(new DataPortionInterfaceImpl(1, ConverterInterface.Channel.LEFT_CHANNEL)));
-//        queue.add(new MyClass(new DataPortionInterfaceImpl(1, ConverterInterface.Channel.LEFT_CHANNEL)));
-//        queue.add(new MyClass(new DataPortionInterfaceImpl(1, ConverterInterface.Channel.LEFT_CHANNEL)));
-//        queue.add(new MyClass(new DataPortionInterfaceImpl(1, ConverterInterface.Channel.LEFT_CHANNEL)));
-//        while (queue.size() != 0)
-//            System.out.println(queue.remove());
-//
-//        System.out.println("Stop");
-    }
 }
